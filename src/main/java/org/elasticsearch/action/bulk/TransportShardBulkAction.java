@@ -28,6 +28,7 @@ import org.elasticsearch.ElasticSearchGenerationException;
 import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.RoutingMissingException;
+import org.elasticsearch.action.bulk.BulkItemResponse.Failure;
 import org.elasticsearch.action.delete.DeleteRequest;
 import org.elasticsearch.action.delete.DeleteResponse;
 import org.elasticsearch.action.index.IndexRequest;
@@ -217,16 +218,23 @@ public class TransportShardBulkAction extends TransportShardReplicationOperation
 
         Set<Tuple<String, String>> mappingsToUpdate = null;
 
-        BulkItemResponse[] responses = new BulkItemResponse[request.items().length];
-        long[] versions = new long[request.items().length];
-        for (int i = 0; i < request.items().length; i++) {
+        int numItems = request.items().length;
+        BulkItemResponse[] responses = new BulkItemResponse[numItems];
+        long[] versions = new long[numItems];
+
+        for (int i = 0; i < numItems; i++) {
             BulkItemRequest item = request.items()[i];
+
+            //Index action
             if (item.request() instanceof IndexRequest) {
-            	
-                indexRequest(clusterState, shardRequest, ops, versions, responses, 
-                		mappingsToUpdate, item, indexShard, request, (IndexRequest) item.request(), i);
-                
-            } else if(item.request() instanceof PartialDocumentUpdateRequest) { 
+                indexRequest(
+                    clusterState, shardRequest, ops, versions, responses,
+                    mappingsToUpdate, item, indexShard, request, (IndexRequest) item.request(), i
+                );
+
+            //Update action
+            } else if (item.request() instanceof PartialDocumentUpdateRequest) {
+
             	PartialDocumentUpdateRequest updateRequest = (PartialDocumentUpdateRequest) item.request();
             	final GetResult getResult = indexShard.getService().get(updateRequest.getType(), updateRequest.getId(),
                         new String[]{SourceFieldMapper.NAME, RoutingFieldMapper.NAME, ParentFieldMapper.NAME, TTLFieldMapper.NAME}, true);
@@ -234,31 +242,36 @@ public class TransportShardBulkAction extends TransportShardReplicationOperation
                 // no doc, what to do, what to do...
                 if (!getResult.isExists()) {
                     if (updateRequest.getUpsertRequest() == null) {
-                        logger.trace("[{}][{}] failed to execute bulk item, document not indexed yet, " +
-                        		"upsertRequest is missing (update) {}", shardRequest.request.index(), shardRequest.shardId, updateRequest);
-                        responses[i] = new BulkItemResponse(item.id(), "update",
-                                new BulkItemResponse.Failure(updateRequest.index(), updateRequest.getType(), updateRequest.getId(), 
-                                		"Document not indexed and upsertRequest is missing!"));
-                        break;
+                        logger.debug(
+                            "[{}][{}] failed to execute bulk item, document not indexed yet, upsertRequest is missing (update) {}",
+                            shardRequest.request.index(), shardRequest.shardId, updateRequest
+                        );
+                        Failure fail = new Failure(
+                            updateRequest.index(), updateRequest.getType(), updateRequest.getId(), "Document not indexed and upsertRequest is missing!"
+                        );
+                        responses[i] = new BulkItemResponse(item.id(), "update", fail);
+                        continue;
                     }
-                    
-                    indexRequest(clusterState, shardRequest, ops, versions, responses, mappingsToUpdate, 
-                    		item, indexShard, request, updateRequest.getUpsertRequest(), i);
+
+                    indexRequest(
+                        clusterState, shardRequest, ops, versions, responses, mappingsToUpdate,
+                        item, indexShard, request, updateRequest.getUpsertRequest(), i
+                    );
+
+                    continue;
                 }
                 
                 if (getResult.internalSourceRef() == null) {
-                	logger.trace("[{}][{}] failed to execute bulk item, indexed document without source (update) {}", shardRequest.request.index(), shardRequest.shardId, updateRequest);
-                    responses[i] = new BulkItemResponse(item.id(), "update",
-                            new BulkItemResponse.Failure(updateRequest.index(), updateRequest.getType(), updateRequest.getId(), 
-                            		"Indexed document without source!"));
-                    break;
+                	logger.debug(
+                        "[{}][{}] failed to execute bulk item, indexed document without source (update) {}",
+                        shardRequest.request.index(), shardRequest.shardId, updateRequest
+                    );
+                    Failure fail = new Failure(updateRequest.index(), updateRequest.getType(), updateRequest.getId(), "Indexed document without source!");
+                    responses[i] = new BulkItemResponse(item.id(), "update", fail);
+                    continue;
                 }
 
                 Tuple<XContentType, Map<String, Object>> sourceAndContent = XContentHelper.convertToMap(getResult.internalSourceRef(), true);
-               // String operation = null;
-               // String timestamp = null;
-                Long ttl = null;
-               // Object fetchedTTL = null;
                 final Map<String, Object> updatedSourceAsMap;
                 final XContentType updateSourceContentType = sourceAndContent.v1();
                 String routing = getResult.getFields().containsKey(RoutingFieldMapper.NAME) ? getResult.field(RoutingFieldMapper.NAME).getValue().toString() : null;
@@ -266,10 +279,7 @@ public class TransportShardBulkAction extends TransportShardReplicationOperation
 
                 IndexRequest indexRequest = updateRequest.getDoc();
                 updatedSourceAsMap = sourceAndContent.v2();
-                if (indexRequest.ttl() > 0) {
-                    ttl = indexRequest.ttl();
-                }
-               // timestamp = indexRequest.getTimestamp();
+
                 if (indexRequest.routing() != null) {
                     routing = indexRequest.routing();
                 }
@@ -278,7 +288,7 @@ public class TransportShardBulkAction extends TransportShardReplicationOperation
                 }
                 XContentHelper.update(updatedSourceAsMap, indexRequest.sourceAsMap());
                 
-                XContentBuilder builder = null;
+                XContentBuilder builder;
                 try {
                     builder = XContentFactory.contentBuilder(updateSourceContentType);
                     builder.map(updatedSourceAsMap);
@@ -294,10 +304,10 @@ public class TransportShardBulkAction extends TransportShardReplicationOperation
                 indexShard.index(index);
                 
                 // add the response
-                responses[i] = new BulkItemResponse(item.id(), "update",
-                        new IndexResponse(updateRequest.index(), updateRequest.getType(), updateRequest.getId(), indexRequest.version()));
-                
-            	
+                responses[i] = new BulkItemResponse(
+                    item.id(), "update", new IndexResponse(updateRequest.index(), updateRequest.getType(), updateRequest.getId(), indexRequest.version()));
+
+
             } else if (item.request() instanceof DeleteRequest) {
                 DeleteRequest deleteRequest = (DeleteRequest) item.request();
 
@@ -329,6 +339,8 @@ public class TransportShardBulkAction extends TransportShardReplicationOperation
                     // nullify the request so it won't execute on the replicas
                     request.items()[i] = null;
                 }
+            } else {
+                throw new IllegalStateException("Unsupported request type: " + item.request().getClass().getName());
             }
         }
 
