@@ -299,7 +299,7 @@ public class TransportShardBulkAction extends TransportShardReplicationOperation
                 } catch (IOException e) {
                     throw new ElasticSearchGenerationException("Failed to generate [" + updatedSourceAsMap + "]", e);
                 }
-                
+               
                 SourceToParse sourceToParse = SourceToParse.source(builder.bytes()).type(updateRequest.getType()).id(updateRequest.getId())
                         .routing(routing).parent(parent);
                 
@@ -313,7 +313,10 @@ public class TransportShardBulkAction extends TransportShardReplicationOperation
                 // update the version on request so it will happen on the replicas
                 indexRequest.version(version);
                 
+                indexRequest.source(builder);
+                
                 updateRequest.getDoc().create(false);
+                
                 
                 // add the response
                 responses[i] = new BulkItemResponse(
